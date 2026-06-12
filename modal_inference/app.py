@@ -104,7 +104,7 @@ def _segformer_mask(segmenter, person_img, category: str):
     """Return (clothing_mask, face_mask) both as PIL Images."""
     import cv2
     import numpy as np
-    from PIL import Image
+    from PIL import Image  # noqa: needed for mask resize
 
     label_set = {
         "upper": _UPPER_LABELS,
@@ -113,13 +113,17 @@ def _segformer_mask(segmenter, person_img, category: str):
     }.get(category, _UPPER_LABELS)
 
     results = segmenter(person_img)
-    w, h = person_img.size
-    mask_arr = np.zeros((h, w), dtype=np.uint8)
-    face_arr = np.zeros((h, w), dtype=np.uint8)
+    # SegFormer may return masks at its own internal resolution — force them to
+    # match person_img so all numpy shapes are consistent.
+    pw, ph = person_img.size  # PIL: (W, H)
+    mask_arr = np.zeros((ph, pw), dtype=np.uint8)
+    face_arr = np.zeros((ph, pw), dtype=np.uint8)
 
     for seg in results:
         label = seg["label"]
-        seg_mask = np.array(seg["mask"].convert("L"))
+        seg_mask = np.array(
+            seg["mask"].convert("L").resize((pw, ph), Image.NEAREST)
+        )
         if label in label_set:
             mask_arr = np.maximum(mask_arr, seg_mask)
         elif label in _FACE_LABELS:
