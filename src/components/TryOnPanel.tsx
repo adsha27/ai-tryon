@@ -50,7 +50,7 @@ export function TryOnPanel() {
           return;
         }
         if (job.status === "failed") throw new TryOnError(job.error ?? "Try-on failed");
-        if (Date.now() - start > 120_000) throw new TryOnError("Timed out after 2 minutes");
+        if (Date.now() - start > 300_000) throw new TryOnError("Timed out after 5 minutes");
       }
     } catch (e) {
       setErrorMsg(e instanceof TryOnError ? e.message : "Unexpected error — check console");
@@ -91,14 +91,20 @@ export function TryOnPanel() {
       </div>
 
       <div className="md:col-span-2 flex flex-col gap-3">
-        <div className="w-full aspect-[3/4] rounded-2xl border border-zinc-800 flex items-center justify-center overflow-hidden bg-zinc-950">
+        <div className="w-full aspect-[3/4] rounded-2xl border border-zinc-800 flex items-center justify-center overflow-hidden bg-zinc-950 relative">
           {resultUrl
-            ? <img src={resultUrl} alt="Try-on result" className="w-full h-full object-cover" />
+            ? <>
+                <img src={resultUrl} alt="Try-on result" className="w-full h-full object-cover" />
+                {personUrl && (
+                  <img src={personUrl} alt="Original"
+                    className="absolute bottom-3 left-3 w-16 h-20 object-cover rounded-lg border border-zinc-700 shadow-lg opacity-80 hover:opacity-100 transition-opacity" />
+                )}
+              </>
             : busy
             ? <div className="flex flex-col items-center gap-3 text-zinc-600">
                 <div className="w-8 h-8 border-2 border-zinc-700 border-t-zinc-400 rounded-full animate-spin" />
                 <span className="text-sm">Generating… {elapsed}s</span>
-                <span className="text-xs text-zinc-700">Usually 15–25 seconds</span>
+                <span className="text-xs text-zinc-700">{elapsed < 30 ? "Starting GPU…" : "Diffusing garment…"}</span>
               </div>
             : stage === "error"
             ? <div className="flex flex-col items-center gap-2 px-6 text-center">

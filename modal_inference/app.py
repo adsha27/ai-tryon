@@ -14,6 +14,12 @@ After deploy, modal prints endpoint URLs. Copy them to .env.local:
     MODAL_TRYON_START_URL=https://<workspace>--ai-tryon-start-tryon.modal.run
     MODAL_TRYON_STATUS_URL=https://<workspace>--ai-tryon-get-status.modal.run
     MODAL_BGREMOVE_URL=https://<workspace>--ai-tryon-remove-bg.modal.run
+
+Architecture note:
+    CatVTON's AutoMasker depends on detectron2 (abandoned, no wheels for
+    PyTorch 2.x / CUDA 12.x). We replace it with SegFormer
+    (mattmdjaga/segformer_b2_clothes), a pure-Python clothing segmentation
+    model that installs from pip with no C++ compilation.
 """
 
 import io
@@ -25,8 +31,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel
 
 # -----------------------------------------------------------------------
-# Container image — CatVTON + detectron2 (DensePose) + all deps
-# Built once, cached by Modal until a .run_commands() line changes.
+# Container image — pure pip, no CUDA compilation required
 # -----------------------------------------------------------------------
 tryon_image = (
     modal.Image.debian_slim(python_version="3.10")
@@ -44,36 +49,31 @@ tryon_image = (
         extra_index_url="https://download.pytorch.org/whl/cu121",
     )
     .run_commands(
-        # detectron2 (needed by CatVTON's DensePose masker)
-        "pip install detectron2 -f "
-        "https://dl.fbaipublicfiles.com/detectron2/wheels/cu121/torch2.1/index.html",
-        # CatVTON source
         "git clone https://github.com/Zheng-Chong/CatVTON /root/CatVTON",
-        # CatVTON python deps (skip torch/torchvision already installed)
-        "pip install "
-        "accelerate==0.31.0 "
-        "diffusers==0.29.2 "
-        "huggingface_hub==0.23.4 "
-        "numpy==1.26.4 "
-        "opencv-python==4.10.0.84 "
-        "Pillow==10.3.0 "
-        "PyYAML==6.0.1 "
-        "scipy==1.13.1 "
-        "scikit-image==0.24.0 "
-        "transformers==4.27.3 "
-        "tqdm==4.66.4 "
-        "requests "
+    )
+    .pip_install(
+        "accelerate==0.31.0",
+        "diffusers==0.29.2",
+        "huggingface_hub==0.23.4",
+        "numpy==1.26.4",
+        "opencv-python==4.10.0.84",
+        "Pillow==10.3.0",
+        "PyYAML==6.0.1",
+        "scipy==1.13.1",
+        "scikit-image==0.24.0",
+        "transformers==4.40.0",  # SegFormer needs >=4.30
+        "tqdm==4.66.4",
+        "requests",
         "xformers==0.0.23.post1",
+        "fastapi[standard]",
     )
     .env({"PYTHONPATH": "/root/CatVTON"})
 )
 
-# rembg for background removal — CPU only, much cheaper
 bgremove_image = (
     modal.Image.debian_slim(python_version="3.10")
     .apt_install("libgl1-mesa-glx", "libglib2.0-0")
-    .pip_install("rembg", "onnxruntime", "Pillow", "requests")
-    # Pre-download u2net model into the image so cold starts are fast
+    .pip_install("rembg", "onnxruntime", "Pillow", "requests", "fastapi[standard]")
     .run_commands(
         "python -c \"from rembg import new_session; new_session('u2net')\""
     )
@@ -82,24 +82,68 @@ bgremove_image = (
 # -----------------------------------------------------------------------
 # Shared state
 # -----------------------------------------------------------------------
-# Persistent volume for CatVTON / SD weights (~9GB, downloaded once)
 weights_vol = modal.Volume.from_name("catvton-weights", create_if_missing=True)
-
-# Job state dict — maps job_id → { status, output?, error? }
 jobs = modal.Dict.from_name("tryon-jobs", create_if_missing=True)
 
 app = modal.App("ai-tryon")
 
+
+# -----------------------------------------------------------------------
+# Clothing mask via SegFormer (replaces AutoMasker / detectron2)
+# -----------------------------------------------------------------------
+# Label IDs from mattmdjaga/segformer_b2_clothes
+_UPPER_LABELS = {"Upper-clothes", "Dress", "Coat"}
+_LOWER_LABELS = {"Pants", "Skirt"}
+_OVERALL_LABELS = {"Upper-clothes", "Dress", "Coat", "Pants", "Skirt", "Jumpsuit"}
+
+
+def _segformer_mask(segmenter, person_img, category: str):
+    """Return a binary PIL mask for the clothing region to replace."""
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    label_set = {
+        "upper": _UPPER_LABELS,
+        "lower": _LOWER_LABELS,
+        "overall": _OVERALL_LABELS,
+    }.get(category, _UPPER_LABELS)
+
+    # Regions the diffusion must never touch
+    _PROTECT = {"Face", "Hair", "Hat", "Sunglasses"}
+
+    results = segmenter(person_img)
+    w, h = person_img.size
+    mask_arr = np.zeros((h, w), dtype=np.uint8)
+    protect_arr = np.zeros((h, w), dtype=np.uint8)
+
+    for seg in results:
+        label = seg["label"]
+        seg_mask = np.array(seg["mask"].convert("L"))
+        if label in label_set:
+            mask_arr = np.maximum(mask_arr, seg_mask)
+        elif label in _PROTECT:
+            protect_arr = np.maximum(protect_arr, seg_mask)
+
+    # Dilate to cover garment edges and collar regions SegFormer misses
+    kernel = np.ones((25, 25), np.uint8)
+    mask_arr = cv2.dilate(mask_arr, kernel, iterations=2)
+
+    # Protect face and hair — never let diffusion touch them
+    mask_arr[protect_arr > 64] = 0
+
+    return Image.fromarray(mask_arr)
+
+
 # -----------------------------------------------------------------------
 # GPU inference class
-# Loads model once per container lifetime; container stays warm 5 min.
 # -----------------------------------------------------------------------
 @app.cls(
     gpu="A10G",
     image=tryon_image,
     volumes={"/weights": weights_vol},
     timeout=180,
-    container_idle_timeout=300,
+    scaledown_window=300,
     secrets=[modal.Secret.from_name("vercel-blob")],
 )
 class TryOnModel:
@@ -111,10 +155,9 @@ class TryOnModel:
         import torch
         from diffusers.image_processor import VaeImageProcessor
         from huggingface_hub import snapshot_download
-        from model.cloth_masker import AutoMasker
         from model.pipeline import CatVTONPipeline
+        from transformers import pipeline as hf_pipeline
 
-        # Download weights into the mounted volume (persists across cold starts)
         repo_path = snapshot_download(
             repo_id="zhengchong/CatVTON",
             local_dir="/weights/catvton",
@@ -135,12 +178,11 @@ class TryOnModel:
             do_binarize=True,
             do_convert_grayscale=True,
         )
-        # AutoMasker runs DensePose + SCHP to remove existing clothes —
-        # this is the step that fixes the garment bleed-through problem.
-        self.automasker = AutoMasker(
-            densepose_ckpt=os.path.join(repo_path, "DensePose"),
-            schp_ckpt=os.path.join(repo_path, "SCHP"),
-            device="cuda",
+        # SegFormer-based clothing segmenter — pure PyTorch, no detectron2
+        self.segmenter = hf_pipeline(
+            "image-segmentation",
+            model="mattmdjaga/segformer_b2_clothes",
+            device=0,  # GPU
         )
 
     @modal.method()
@@ -165,7 +207,7 @@ class TryOnModel:
             person_img = resize_and_crop(person_img, (768, 1024))
             garment_img = resize_and_padding(garment_img, (768, 1024))
 
-            mask = self.automasker(person_img, category)["mask"]
+            mask = _segformer_mask(self.segmenter, person_img, category)
             mask = self.mask_processor.blur(mask, blur_factor=9)
 
             result = self.pipeline(
@@ -190,13 +232,11 @@ class TryOnModel:
 
 
 def _upload_blob(data: bytes, filename: str, content_type: str) -> str:
-    """Upload bytes to Vercel Blob, return public URL."""
     import requests
 
     token = os.environ["BLOB_READ_WRITE_TOKEN"]
     resp = requests.put(
         f"https://blob.vercel-storage.com/{filename}",
-        params={"addRandomSuffix": "1"},
         headers={
             "authorization": f"Bearer {token}",
             "x-content-type": content_type,
@@ -209,7 +249,7 @@ def _upload_blob(data: bytes, filename: str, content_type: str) -> str:
 
 
 # -----------------------------------------------------------------------
-# HTTP endpoints (CPU — just dispatch / read state)
+# HTTP endpoints
 # -----------------------------------------------------------------------
 CATEGORY_MAP = {
     "tops": "upper",
@@ -230,7 +270,7 @@ class BgRemoveInput(BaseModel):
 
 
 @app.function(image=tryon_image)
-@modal.web_endpoint(method="POST")
+@modal.fastapi_endpoint(method="POST")
 def start_tryon(data: TryOnInput):
     if not data.person_url or not data.garment_url:
         raise HTTPException(status_code=400, detail="person_url and garment_url required")
@@ -243,7 +283,7 @@ def start_tryon(data: TryOnInput):
 
 
 @app.function(image=tryon_image)
-@modal.web_endpoint(method="GET")
+@modal.fastapi_endpoint(method="GET")
 def get_status(job_id: str):
     state = jobs.get(job_id)
     if state is None:
@@ -257,7 +297,7 @@ def get_status(job_id: str):
     secrets=[modal.Secret.from_name("vercel-blob")],
     timeout=60,
 )
-@modal.web_endpoint(method="POST")
+@modal.fastapi_endpoint(method="POST")
 def remove_bg(data: BgRemoveInput):
     import requests
     from PIL import Image

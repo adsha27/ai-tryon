@@ -23,7 +23,7 @@ export default function Home() {
         <TryOnPanel />
 
         <p className="text-xs text-zinc-700 text-center">
-          Powered by FASHN.ai · Results in 5–17s · Works on any garment type
+          Powered by CatVTON · Self-hosted on Modal · ~90s cold start, ~35s warm
         </p>
       </div>
     </main>
