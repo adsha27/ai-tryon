@@ -97,8 +97,11 @@ _LOWER_LABELS = {"Pants", "Skirt"}
 _OVERALL_LABELS = {"Upper-clothes", "Dress", "Coat", "Pants", "Skirt", "Jumpsuit"}
 
 
+_FACE_LABELS = {"Face", "Hair", "Hat", "Sunglasses"}
+
+
 def _segformer_mask(segmenter, person_img, category: str):
-    """Return a binary PIL mask for the clothing region to replace."""
+    """Return (clothing_mask, face_mask) both as PIL Images."""
     import cv2
     import numpy as np
     from PIL import Image
@@ -109,30 +112,50 @@ def _segformer_mask(segmenter, person_img, category: str):
         "overall": _OVERALL_LABELS,
     }.get(category, _UPPER_LABELS)
 
-    # Regions the diffusion must never touch
-    _PROTECT = {"Face", "Hair", "Hat", "Sunglasses"}
-
     results = segmenter(person_img)
     w, h = person_img.size
     mask_arr = np.zeros((h, w), dtype=np.uint8)
-    protect_arr = np.zeros((h, w), dtype=np.uint8)
+    face_arr = np.zeros((h, w), dtype=np.uint8)
 
     for seg in results:
         label = seg["label"]
         seg_mask = np.array(seg["mask"].convert("L"))
         if label in label_set:
             mask_arr = np.maximum(mask_arr, seg_mask)
-        elif label in _PROTECT:
-            protect_arr = np.maximum(protect_arr, seg_mask)
+        elif label in _FACE_LABELS:
+            face_arr = np.maximum(face_arr, seg_mask)
 
-    # Dilate to cover garment edges and collar regions SegFormer misses
+    # Dilate clothing mask to cover garment edges and collar regions
     kernel = np.ones((25, 25), np.uint8)
     mask_arr = cv2.dilate(mask_arr, kernel, iterations=2)
 
-    # Protect face and hair — never let diffusion touch them
-    mask_arr[protect_arr > 64] = 0
+    # Keep face/hair out of the inpainting mask
+    mask_arr[face_arr > 64] = 0
 
-    return Image.fromarray(mask_arr)
+    return Image.fromarray(mask_arr), Image.fromarray(face_arr)
+
+
+def _restore_face(result_img, original_img, face_mask_pil):
+    """Paste the original face back onto the diffusion result with feathered edges."""
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    face_arr = np.array(face_mask_pil, dtype=np.uint8)
+
+    # Dilate slightly so the paste covers any fringe artifacts around the face
+    kernel = np.ones((15, 15), np.uint8)
+    face_arr = cv2.dilate(face_arr, kernel, iterations=1)
+
+    # Feather edges so the paste blends naturally
+    alpha = cv2.GaussianBlur(face_arr, (31, 31), 0).astype(np.float32) / 255.0
+    alpha = np.stack([alpha] * 3, axis=-1)
+
+    orig = np.array(original_img, dtype=np.float32)
+    res = np.array(result_img, dtype=np.float32)
+
+    blended = orig * alpha + res * (1.0 - alpha)
+    return Image.fromarray(blended.astype(np.uint8))
 
 
 # -----------------------------------------------------------------------
@@ -207,7 +230,7 @@ class TryOnModel:
             person_img = resize_and_crop(person_img, (768, 1024))
             garment_img = resize_and_padding(garment_img, (768, 1024))
 
-            mask = _segformer_mask(self.segmenter, person_img, category)
+            mask, face_mask = _segformer_mask(self.segmenter, person_img, category)
             mask = self.mask_processor.blur(mask, blur_factor=9)
 
             result = self.pipeline(
@@ -218,6 +241,9 @@ class TryOnModel:
                 guidance_scale=2.5,
                 generator=torch.Generator(device="cuda").manual_seed(42),
             )[0]
+
+            # Paste original face back — prevents SD inpainting from distorting it
+            result = _restore_face(result, person_img, face_mask)
 
             buf = io.BytesIO()
             result.save(buf, format="JPEG", quality=92)
