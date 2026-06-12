@@ -1,4 +1,4 @@
-import { pollTryOn } from "./fashn";
+import { pollTryOn } from "./vton";
 
 export class TryOnError extends Error {
   constructor(message: string) {
@@ -7,7 +7,7 @@ export class TryOnError extends Error {
   }
 }
 
-// Polls a FASHN job until completion or failure.
+// Polls a try-on job until completion or failure.
 // Throws TryOnError on failure or timeout.
 export async function waitForTryOn(
   jobId: string,

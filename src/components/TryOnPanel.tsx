@@ -5,7 +5,7 @@ import { PhotoUpload } from "./PhotoUpload";
 import { Sparkles, Clock } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TryOnError } from "@/lib/poll";
-import type { GarmentCategory, TryOnMode } from "@/lib/fashn";
+import type { GarmentCategory } from "@/lib/vton";
 
 type Stage = "idle" | "processing" | "done" | "error";
 
@@ -13,7 +13,6 @@ export function TryOnPanel() {
   const [personUrl, setPersonUrl] = useState<string | null>(null);
   const [garmentUrl, setGarmentUrl] = useState<string | null>(null);
   const [category, setCategory] = useState<GarmentCategory>("auto");
-  const [mode, setMode] = useState<TryOnMode>("balanced");
   const [stage, setStage] = useState<Stage>("idle");
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -31,7 +30,7 @@ export function TryOnPanel() {
       const res = await fetch("/api/tryon", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model_image: personUrl, garment_image: garmentUrl, category, mode }),
+        body: JSON.stringify({ model_image: personUrl, garment_image: garmentUrl, category }),
       });
 
       const { id, error } = await res.json();
@@ -57,7 +56,7 @@ export function TryOnPanel() {
       setErrorMsg(e instanceof TryOnError ? e.message : "Unexpected error — check console");
       setStage("error");
     }
-  }, [personUrl, garmentUrl, category, mode]);
+  }, [personUrl, garmentUrl, category]);
 
   const busy = stage === "processing";
   const canRun = personUrl && garmentUrl && !busy;
@@ -80,16 +79,6 @@ export function TryOnPanel() {
             ))}
           </div>
 
-          <span className="text-xs text-zinc-500 uppercase tracking-wider mt-1">Quality</span>
-          <div className="grid grid-cols-3 gap-1.5">
-            {(["performance", "balanced", "quality"] as TryOnMode[]).map((m) => (
-              <button key={m} onClick={() => setMode(m)}
-                className={cn("text-xs py-1.5 rounded-lg border transition-colors capitalize",
-                  mode === m ? "border-zinc-400 bg-zinc-800 text-zinc-100" : "border-zinc-800 text-zinc-500 hover:border-zinc-700")}>
-                {m}
-              </button>
-            ))}
-          </div>
         </div>
 
         <button onClick={run} disabled={!canRun}
@@ -109,7 +98,7 @@ export function TryOnPanel() {
             ? <div className="flex flex-col items-center gap-3 text-zinc-600">
                 <div className="w-8 h-8 border-2 border-zinc-700 border-t-zinc-400 rounded-full animate-spin" />
                 <span className="text-sm">Generating… {elapsed}s</span>
-                <span className="text-xs text-zinc-700">Usually 5–17 seconds</span>
+                <span className="text-xs text-zinc-700">Usually 15–25 seconds</span>
               </div>
             : stage === "error"
             ? <div className="flex flex-col items-center gap-2 px-6 text-center">

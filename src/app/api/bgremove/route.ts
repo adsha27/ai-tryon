@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { removeBg } from "@/lib/fashn";
+import { removeBg } from "@/lib/vton";
 
 export async function POST(req: NextRequest) {
   const { image_url } = await req.json();

@@ -1,0 +1,5 @@
+# Local dev / IDE autocomplete only.
+# All inference dependencies live inside the Modal container image.
+modal>=0.64
+fastapi
+pydantic

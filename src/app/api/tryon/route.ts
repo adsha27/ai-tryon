@@ -1,21 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
-import { startTryOn, pollTryOn, type TryOnMode, type GarmentCategory } from "@/lib/fashn";
+import { startTryOn, pollTryOn, type GarmentCategory } from "@/lib/vton";
 
 export async function POST(req: NextRequest) {
-  const { model_image, garment_image, category, mode } = await req.json();
+  const { model_image, garment_image, category } = await req.json();
 
   if (!model_image || !garment_image) {
     return NextResponse.json({ error: "model_image and garment_image required" }, { status: 400 });
   }
 
-  console.log("[tryon] starting job", { category, mode });
+  console.log("[tryon] starting job", { category });
 
   try {
     const { id } = await startTryOn({
       model_image,
       garment_image,
       category: category as GarmentCategory,
-      mode: mode as TryOnMode,
     });
     console.log("[tryon] job started:", id);
     return NextResponse.json({ id });
