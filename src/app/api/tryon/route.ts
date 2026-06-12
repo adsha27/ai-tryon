@@ -8,20 +8,36 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "model_image and garment_image required" }, { status: 400 });
   }
 
-  const { id } = await startTryOn({
-    model_image,
-    garment_image,
-    category: category as GarmentCategory,
-    mode: mode as TryOnMode,
-  });
+  console.log("[tryon] starting job", { category, mode });
 
-  return NextResponse.json({ id });
+  try {
+    const { id } = await startTryOn({
+      model_image,
+      garment_image,
+      category: category as GarmentCategory,
+      mode: mode as TryOnMode,
+    });
+    console.log("[tryon] job started:", id);
+    return NextResponse.json({ id });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[tryon] startTryOn failed:", msg);
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
 }
 
 export async function GET(req: NextRequest) {
   const id = req.nextUrl.searchParams.get("id");
   if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
 
-  const job = await pollTryOn(id);
-  return NextResponse.json(job);
+  try {
+    const job = await pollTryOn(id);
+    if (job.status === "completed") console.log("[tryon] done:", id);
+    if (job.status === "failed") console.error("[tryon] failed:", id, job.error);
+    return NextResponse.json(job);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[tryon] poll error:", id, msg);
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
 }
