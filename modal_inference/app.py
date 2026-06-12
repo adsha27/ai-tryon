@@ -141,9 +141,16 @@ def _restore_face(result_img, original_img, face_mask_pil):
     import numpy as np
     from PIL import Image
 
+    # Normalize — pipeline may return a different size/orientation than input
+    target = original_img.size  # (W, H)
+    if result_img.size != target:
+        result_img = result_img.resize(target, Image.LANCZOS)
+    if face_mask_pil.size != target:
+        face_mask_pil = face_mask_pil.resize(target, Image.NEAREST)
+
     face_arr = np.array(face_mask_pil, dtype=np.uint8)
 
-    # Small dilation — enough to cover face boundary artifacts, not enough to hit collar
+    # Small dilation — covers face boundary artifacts without bleeding into collar
     kernel = np.ones((5, 5), np.uint8)
     face_arr = cv2.dilate(face_arr, kernel, iterations=1)
 
