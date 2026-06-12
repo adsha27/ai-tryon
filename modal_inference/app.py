@@ -129,8 +129,8 @@ def _segformer_mask(segmenter, person_img, category: str):
     kernel = np.ones((25, 25), np.uint8)
     mask_arr = cv2.dilate(mask_arr, kernel, iterations=2)
 
-    # Keep face/hair out of the inpainting mask
-    mask_arr[face_arr > 64] = 0
+    # Keep face/hair out of the inpainting mask — high threshold so collar pixels aren't cut
+    mask_arr[face_arr > 200] = 0
 
     return Image.fromarray(mask_arr), Image.fromarray(face_arr)
 
@@ -143,12 +143,12 @@ def _restore_face(result_img, original_img, face_mask_pil):
 
     face_arr = np.array(face_mask_pil, dtype=np.uint8)
 
-    # Dilate slightly so the paste covers any fringe artifacts around the face
-    kernel = np.ones((15, 15), np.uint8)
+    # Small dilation — enough to cover face boundary artifacts, not enough to hit collar
+    kernel = np.ones((5, 5), np.uint8)
     face_arr = cv2.dilate(face_arr, kernel, iterations=1)
 
-    # Feather edges so the paste blends naturally
-    alpha = cv2.GaussianBlur(face_arr, (31, 31), 0).astype(np.float32) / 255.0
+    # Tight feather — keeps the blend away from the neck/collar area
+    alpha = cv2.GaussianBlur(face_arr, (15, 15), 0).astype(np.float32) / 255.0
     alpha = np.stack([alpha] * 3, axis=-1)
 
     orig = np.array(original_img, dtype=np.float32)
